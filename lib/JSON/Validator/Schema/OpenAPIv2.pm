@@ -1,7 +1,7 @@
 package JSON::Validator::Schema::OpenAPIv2;
 use Mojo::Base 'JSON::Validator::Schema';
 
-use JSON::Validator::Util qw(E json_pointer);
+use JSON::Validator::Util qw(E json_pointer schema_type);
 use Mojo::JSON qw(false true);
 use Mojo::URL;
 use Scalar::Util 'looks_like_number';
@@ -114,7 +114,11 @@ sub validate_request {
 
   for my $param (@$parameters) {
     my $val = $c->openapi->get_req_value($param);
-    $val->{exists} = ($val->{exists} // defined $val->{value}) ? true : false;
+    $val->{exists} = (
+      $val->{exists} // (
+        ref $val->{value} eq 'ARRAY' ? @{$val->{value}} : defined $val->{value}
+      )
+    ) ? true : false;
     $val->{name} ||= $param->{name};
     $self->_set_default_value_from_schema($val, $param) unless $val->{exists};
 
@@ -123,7 +127,7 @@ sub validate_request {
       my $schema
         = $val->{content_type} && $param->{consumes}{$val->{content_type}};
       $schema //= $param->{'x-json-schema'} || $param->{schema} || $param;
-      my @e = map { $_->path(_prefix_path($param->{name}, $_->path)); $_ }
+      my @e = map { $_->path(_prefix_req_path($param->{name}, $_->path)); $_ }
         $self->validate($val->{value}, $schema);
       $c->openapi->set_req_value($val) unless @e;
       push @errors, @e;
@@ -152,15 +156,19 @@ sub validate_response {
   my @errors;
   for my $param (@$parameters) {
     my $val = $c->openapi->get_res_value($param);
-    $self->_set_default_value_from_schema($val, $param)
-      unless $val->{exists} //= defined $val->{value};
+    $val->{exists} = (
+      $val->{exists} // (
+        ref $val->{value} eq 'ARRAY' ? @{$val->{value}} : defined $val->{value}
+      )
+    ) ? true : false;
+    $self->_set_default_value_from_schema($val, $param) unless $val->{exists};
 
     if ($val->{exists}) {
       my $schema
         = $val->{content_type} && $param->{produces}{$val->{content_type}};
       $schema //= $param->{'x-json-schema'} || $param->{schema} || $param;
       push @errors,
-        map { $_->path(_prefix_path($param->{name}, $_->path)); $_ }
+        map { $_->path(_prefix_res_path($param->{name}, $_->path)); $_ }
         $self->validate($val->{value}, $schema);
     }
     elsif ($param->{required}) {
@@ -217,6 +225,7 @@ sub _build_req_parameters {
     = map {@$_} $self->_find_all_nodes([paths => $path, $method], 'consumes');
   @consumes = ('application/json') unless @consumes;
   for my $param (@parameters) {
+    $param->{type} ||= schema_type($param->{schema} || $param);
     $param->{consumes} = {map { ($_ => $param->{schema}) } @consumes}
       if $param->{in} eq 'body';
     $param->{style} = _translate_collection_format($param)
@@ -257,6 +266,10 @@ sub _build_res_parameters {
       };
   }
 
+  for my $param (@parameters) {
+    $param->{type} ||= schema_type($param->{schema} || $param);
+  }
+
   return $self->{response_parameters}{$cache_key} = \@parameters;
 }
 
@@ -275,7 +288,13 @@ sub _find_all_nodes {
   return @found;
 }
 
-sub _prefix_path {
+sub _prefix_req_path {
+  return join '', "/$_[0]", $_[1] =~ /\w/ ? ($_[1]) : ();
+}
+
+sub _prefix_res_path {
+  return $_[1] =~ /\w/ ? ($_[1]) : ()
+    if $_[0] eq 'body';    # This is unfortunately a design flaw
   return join '', "/$_[0]", $_[1] =~ /\w/ ? ($_[1]) : ();
 }
 
